@@ -377,3 +377,79 @@ Note that `pyseto.encode()` and `pyseto.decode()` are aliases to the `encode()` 
     assert decoded.payload["data"] == "this is a signed message"
     assert decoded.payload["iat"] == "2021-11-11T00:00:00+00:00"
     assert decoded.payload["exp"] == "2021-11-11T01:00:00+00:00"
+
+
+Stable Token Identifier (``token_id``)
+--------------------------------------
+
+A PASETO token is text, but several different Base64URL spellings can decode
+to the same authenticated bytes. The parser accepts all of them:
+
+- Padding characters ``=`` may be appended to the payload or footer segment
+  (the canonical PASETO encoding omits them).
+- Both the URL-safe alphabet (``-``/``_``) and the standard Base64 alphabet
+  (``+``/``/``) are accepted, even mixed within one segment.
+- When the segment length is a multiple of four, non-alphabet characters such
+  as spaces or newlines are silently discarded while decoding.
+- A token without a footer can be written with three segments or with an
+  empty fourth segment (a trailing ``.``); both mean an empty footer.
+
+Storing the raw token string as a revocation key therefore risks missing an
+alias of a revoked token. ``Token.token_id`` solves this: it is a stable
+identifier computed from the *authenticated binary components*, so every
+accepted spelling of one token maps to the same value.
+
+.. code-block:: python
+
+    import pyseto
+    from pyseto import Key, VerifyError
+
+    key = Key.new(4, "local", b"our-secret")
+    token = pyseto.encode(key, b'{"sub":"alice"}')
+
+    decoded = pyseto.decode(key, token)
+    revocation_key = decoded.token_id  # e.g. "pstid1.k6Lf..."
+
+The identifier is defined as::
+
+    "pstid1." + base64url_nopad(SHA-256(PAE([
+        header,                 # b"v4.local." / b"v4.public." / ...
+        raw_payload,            # authenticated bytes from the token text
+        raw_footer,             # authenticated footer bytes (b"" if absent)
+        implicit_assertion,     # b"" for v1/v2
+    ])))
+
+Input contract and guarantees:
+
+- ``raw_payload`` is the payload segment exactly as authenticated, before
+  decryption or signature stripping: nonce + ciphertext + tag for ``local``
+  and message + signature for ``public``. The decrypted claims are never an
+  input, so two tokens with identical claims but different signatures,
+  encryption nonces, footers or implicit assertions get different
+  identifiers.
+- The implicit assertion is part of the identifier for ``v3``/``v4`` because
+  it is authenticated. Verifying the same token under a different assertion
+  fails rather than producing another identifier.
+- ``token_id`` is only populated after ``pyseto.decode()`` has successfully
+  decrypted or verified the token. On a merely parsed object
+  (``Token.new()``) or after any failed verification, accessing it raises
+  ``VerifyError``; no value is ever returned that could be treated as a
+  verified identity without authentication.
+- Mutating ``payload`` or ``footer`` on a decoded ``Token`` does not change
+  the identifier, since it was computed over the original authenticated bytes.
+
+Compatibility policy:
+
+- The ``pstid1.`` prefix identifies this exact hash and PAE layout. If the
+  algorithm or its inputs ever change, a new prefix (``pstid2.``, ...) is
+  introduced; old and new identifiers never collide and remain distinguishable.
+- Identifiers are deterministic across PySETO versions, language bindings and
+  platforms (SHA-256 and PAE are fixed primitives), which makes them safe to
+  persist in revocation lists or databases.
+
+``token_id`` is not a user id or a session id. A user id identifies a subject
+across many tokens; a session id is an application-level claim stored inside
+the payload. The same user (or even the same claims) produces a distinct
+``token_id`` for every distinct signed/encrypted token, while every textual
+alias of one concrete token shares it. It answers precisely "is this concrete
+authenticated token the one I recorded?", which is what revocation needs.

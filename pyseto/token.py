@@ -1,6 +1,14 @@
+import hashlib
 from typing import Any
 
-from .utils import base64url_decode
+from .exceptions import VerifyError
+from .utils import base64url_decode, base64url_encode, pae
+
+#: A version tag prefix of the stable token identifier (``token_id``).
+#: If the hash algorithm or its input layout ever changes, a new prefix
+#: (``"pstid2."`` and so on) will be introduced so that identifiers issued
+#: under different schemes never collide and remain distinguishable.
+TOKEN_ID_PREFIX = "pstid1."
 
 
 class Token:
@@ -20,6 +28,38 @@ class Token:
         self._payload = payload
         self._footer = footer
         self._header = (version + "." + purpose + ".").encode("utf-8")
+        self._token_id: str | None = None
+
+    def mark_verified(self, payload: bytes, footer: bytes, implicit_assertion: bytes = b"") -> str:
+        """
+        Computes the stable token identifier over the authenticated bytes of
+        the token and marks the token as verified.
+
+        This is intended to be called by the PASETO processor only, right
+        after the AEAD tag or the signature has been successfully checked.
+        Parsing a token alone (``Token.new()``) never produces an identifier:
+        accessing ``token_id`` before this method runs raises ``VerifyError``,
+        so an unverified or rejected token can never be mistaken for a
+        verified identity.
+
+        Args:
+            payload (bytes): The raw, still authenticated payload bytes as
+                carried by the token (for ``local``: nonce, ciphertext and
+                tag; for ``public``: message and signature), before any
+                decryption, signature stripping or deserialization.
+            footer (bytes): The raw authenticated footer bytes (an empty byte
+                string when the token has no footer).
+            implicit_assertion (bytes): The implicit assertion that was
+                supplied to the successful verification. It is authenticated
+                in ``v3``/``v4`` and is therefore part of the identifier; it
+                is an empty byte string for ``v1``/``v2``.
+        Returns:
+            str: The stable token identifier.
+        """
+        if self._token_id is None:
+            digest = hashlib.sha256(pae([self._header, payload, footer, implicit_assertion])).digest()
+            self._token_id = TOKEN_ID_PREFIX + base64url_encode(digest).decode("utf-8")
+        return self._token_id
 
     @classmethod
     def new(cls, token: bytes | str) -> "Token":
@@ -84,3 +124,28 @@ class Token:
         """
         self._footer = footer
         return
+
+    @property
+    def token_id(self) -> str:
+        """
+        The stable token identifier, available only after the token has been
+        successfully decrypted/verified via :func:`pyseto.decode <pyseto.decode>`.
+
+        It is derived from the authenticated binary components of the token
+        (header, raw payload, raw footer and the implicit assertion), not from
+        the original token text or the decrypted claims. Consequently:
+
+        * Textual aliases that decode to the same authenticated bytes
+          (Base64 padding, the ``+``/``-`` and ``/``/``_`` alphabets or an
+          empty 4th footer segment) yield the same identifier.
+        * Different signatures, encryption nonces, footers or implicit
+          assertions always yield different identifiers, even when the
+          decrypted claims are identical.
+
+        Accessing this property on a merely parsed (not yet verified) token
+        raises ``VerifyError``, so a failed verification never returns an
+        identifier that could be mistaken for a verified identity.
+        """
+        if self._token_id is None:
+            raise VerifyError("token_id is only available after successful verification.")
+        return self._token_id

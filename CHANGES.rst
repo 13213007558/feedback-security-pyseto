@@ -4,6 +4,12 @@ Changes
 Unreleased
 ----------
 
+- Add ``Token.token_id``, a stable token identifier derived from the authenticated binary
+  components (header, raw payload, raw footer and implicit assertion) via SHA-256 over PAE.
+  It is only available after successful decryption/verification (access raises ``VerifyError``
+  otherwise), is identical across accepted Base64URL spellings of the same token, and differs
+  for distinct signatures, nonces, footers or implicit assertions even when the claims match.
+
 Version 1.10.0
 --------------
 

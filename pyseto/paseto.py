@@ -192,10 +192,16 @@ class Paseto:
             if k.header != t.header:
                 continue
             try:
+                raw_payload = cast(bytes, t.payload)
+                raw_footer = cast(bytes, t.footer)
                 if k.purpose == "local":
-                    t.payload = k.decrypt(cast(bytes, t.payload), cast(bytes, t.footer), bi)
+                    t.payload = k.decrypt(raw_payload, raw_footer, bi)
                 else:
-                    t.payload = k.verify(cast(bytes, t.payload), cast(bytes, t.footer), bi)
+                    t.payload = k.verify(raw_payload, raw_footer, bi)
+                # The cryptographic check has passed at this point. Compute the
+                # stable identifier over the authenticated bytes before the
+                # payload/footer are replaced by deserialized objects.
+                t.mark_verified(raw_payload, raw_footer, bi)
                 try:
                     if deserializer:
                         t.payload = deserializer.loads(t.payload)
