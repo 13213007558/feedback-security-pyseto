@@ -56,6 +56,26 @@ class SodiumKey(KeyInterface):
         return
 
     @classmethod
+    def _from_ed25519_secret_bytes(cls, key_material: bytes) -> Ed25519PrivateKey:
+        # A PASERK `k2.secret`/`k4.secret` (and the plaintext inside
+        # `secret-wrap`/`secret-pw`) is the 64-byte concatenation of the
+        # 32-byte Ed25519 seed and its matching public key. Building the key
+        # from only the first 32 bytes would silently discard the embedded
+        # public key and any trailing bytes, so verify the exact length and
+        # confirm the embedded public half matches the one derived from the
+        # seed before accepting the material.
+        if len(key_material) != 64:
+            raise ValueError("Invalid PASERK secret key length.")
+        sk = Ed25519PrivateKey.from_private_bytes(key_material[0:32])
+        pub = sk.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        if not hmac.compare_digest(pub, key_material[32:64]):
+            raise ValueError("The public key does not match the private key.")
+        return sk
+
+    @classmethod
     def from_paserk(
         cls,
         paserk: str,
@@ -81,8 +101,8 @@ class SodiumKey(KeyInterface):
             if frags[1] == "local-wrap":
                 return cls(cls._decode_pie(h, wrapping_key, frags[3]))
             if frags[1] == "secret-wrap":
-                k = cls._decode_pie(h, wrapping_key, frags[3])[0:32]
-                return cls(Ed25519PrivateKey.from_private_bytes(k))
+                sk = cls._from_ed25519_secret_bytes(cls._decode_pie(h, wrapping_key, frags[3]))
+                return cls(sk)
             raise ValueError(f"Invalid PASERK type: {frags[1]}.")
 
         if len(frags) != 3:
@@ -94,8 +114,8 @@ class SodiumKey(KeyInterface):
             if frags[1] == "local-pw":
                 return cls(cls._decode_pbkw(h, password, frags[2]))
             if frags[1] == "secret-pw":
-                k = cls._decode_pbkw(h, password, frags[2])[0:32]
-                return cls(Ed25519PrivateKey.from_private_bytes(k))
+                sk = cls._from_ed25519_secret_bytes(cls._decode_pbkw(h, password, frags[2]))
+                return cls(sk)
             raise ValueError(f"Invalid PASERK type: {frags[1]}.")
 
         if unsealing_key:
@@ -104,10 +124,10 @@ class SodiumKey(KeyInterface):
             if frags[1] != "seal":
                 raise ValueError(f"Invalid PASERK type: {frags[1]}.")
             if unsealing_key.startswith(b"-----BEGIN PRIVATE KEY"):
-                sk = load_pem_private_key(unsealing_key, password=None)
+                pem_sk = load_pem_private_key(unsealing_key, password=None)
             else:
                 raise ValueError("Invalid or unsupported PEM format.")
-            raw_key = sk.private_bytes(
+            raw_key = pem_sk.private_bytes(
                 encoding=serialization.Encoding.Raw,
                 format=serialization.PrivateFormat.Raw,
                 encryption_algorithm=serialization.NoEncryption(),
@@ -133,7 +153,7 @@ class SodiumKey(KeyInterface):
         if frags[1] == "public":
             return cls(Ed25519PublicKey.from_public_bytes(k))
         if frags[1] == "secret":
-            return cls(Ed25519PrivateKey.from_private_bytes(k[0:32]))
+            return cls(cls._from_ed25519_secret_bytes(k))
         if frags[1] == "secret-wrap":
             raise ValueError(f"{frags[1]} needs wrapping_key.")
         if frags[1] == "secret-pw":

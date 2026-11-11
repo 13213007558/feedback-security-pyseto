@@ -4,6 +4,8 @@ Changes
 Unreleased
 ----------
 
+- Reject malformed ``k2.secret``/``k4.secret`` PASERK keys on import: the key material must be exactly 64 bytes and its embedded public key must match the one derived from the 32-byte seed. This also applies to the plaintext inside ``secret-wrap`` and ``secret-pw``; previously a wrong public half, truncation or trailing bytes were silently discarded when the key was rebuilt from only the first 32 bytes.
+
 Version 1.10.0
 --------------
 

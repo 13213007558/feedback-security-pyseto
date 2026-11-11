@@ -3,8 +3,10 @@ from secrets import token_bytes
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicNumbers
 
+import pyseto
 from pyseto import DecryptError, Key, NotSupportedError
 from pyseto.key_interface import KeyInterface
 from pyseto.key_nist import _MAX_PBKDF2_ITERATIONS as _MAX_PBKDF2
@@ -826,3 +828,196 @@ class TestKey:
             k.to_paserk(wrapping_key="xxx", password="yyy")
             pytest.fail("to_paserk() should fail.")
         assert "Only one of wrapping_key or password should be specified." in str(err.value)
+
+
+class TestSodiumSecretPaserkValidation:
+    """
+    Tests for k2.secret/k4.secret key-material validation on import.
+
+    A `k2.secret`/`k4.secret` PASERK (and the plaintext inside
+    `secret-wrap`/`secret-pw`) is the 64-byte concatenation of the Ed25519
+    seed and its matching public key. Import must reject a wrong public half,
+    truncation and trailing bytes instead of silently rebuilding the key from
+    only the first 32 bytes.
+    """
+
+    @pytest.mark.parametrize("version", [2, 4])
+    @pytest.mark.parametrize(
+        "mode, msg",
+        [
+            ("wrong_pub", "The public key does not match the private key."),
+            ("truncated", "Invalid PASERK secret key length."),
+            ("trailing", "Invalid PASERK secret key length."),
+            ("short_seed", "Invalid PASERK secret key length."),
+            ("too_short", "Invalid PASERK secret key length."),
+        ],
+    )
+    def test_from_paserk_secret_rejects_malformed_material(self, version, mode, msg):
+        sk = Ed25519PrivateKey.generate()
+        seed = sk.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        pub = sk.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        malformed = self._malformed_secret_material(mode, seed, pub)
+        paserk = f"k{version}.secret." + base64url_encode(malformed).decode("utf-8")
+        with pytest.raises(ValueError) as err:
+            Key.from_paserk(paserk)
+            pytest.fail("Key.from_paserk() should fail.")
+        assert msg in str(err.value)
+
+    @staticmethod
+    def _malformed_secret_material(mode: str, seed: bytes, pub: bytes) -> bytes:
+        if mode == "wrong_pub":
+            return seed + token_bytes(32)
+        if mode == "truncated":
+            return seed
+        if mode == "trailing":
+            return seed + pub + token_bytes(8)
+        if mode == "short_seed":
+            return seed[0:16] + pub
+        return token_bytes(48)
+
+    @pytest.mark.parametrize("version", [2, 4])
+    @pytest.mark.parametrize(
+        "mode, msg",
+        [
+            ("wrong_pub", "The public key does not match the private key."),
+            ("truncated", "Invalid PASERK secret key length."),
+            ("trailing", "Invalid PASERK secret key length."),
+        ],
+    )
+    def test_from_paserk_secret_wrap_rejects_malformed_material(self, version, mode, msg):
+        wrapping_key = token_bytes(32)
+        sk = Ed25519PrivateKey.generate()
+        key = Key.from_asymmetric_key_params(
+            version,
+            d=sk.private_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PrivateFormat.Raw,
+                encryption_algorithm=serialization.NoEncryption(),
+            ),
+        )
+        seed, pub = self._secret_seed_and_pub(key)
+        wrapped = type(key)._encode_pie(
+            f"k{version}.secret-wrap.pie.",
+            wrapping_key,
+            self._malformed_secret_material(mode, seed, pub),
+        )
+        with pytest.raises(ValueError) as err:
+            Key.from_paserk(f"k{version}.secret-wrap.pie." + wrapped, wrapping_key=wrapping_key)
+            pytest.fail("Key.from_paserk() should fail.")
+        assert msg in str(err.value)
+
+    @pytest.mark.parametrize("version", [2, 4])
+    @pytest.mark.parametrize(
+        "mode, msg",
+        [
+            ("wrong_pub", "The public key does not match the private key."),
+            ("truncated", "Invalid PASERK secret key length."),
+            ("trailing", "Invalid PASERK secret key length."),
+        ],
+    )
+    def test_from_paserk_secret_pw_rejects_malformed_material(self, version, mode, msg):
+        password = b"correct horse battery staple"
+        sk = Ed25519PrivateKey.generate()
+        key = Key.from_asymmetric_key_params(
+            version,
+            d=sk.private_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PrivateFormat.Raw,
+                encryption_algorithm=serialization.NoEncryption(),
+            ),
+        )
+        seed, pub = self._secret_seed_and_pub(key)
+        blob = type(key)._encode_pbkw(
+            f"k{version}.secret-pw.",
+            password,
+            self._malformed_secret_material(mode, seed, pub),
+            15 * 1024,
+            2,
+            1,
+        )
+        with pytest.raises(ValueError) as err:
+            Key.from_paserk(f"k{version}.secret-pw." + blob, password=password)
+            pytest.fail("Key.from_paserk() should fail.")
+        assert msg in str(err.value)
+
+    @staticmethod
+    def _secret_seed_and_pub(key: KeyInterface) -> tuple[bytes, bytes]:
+        seed = key._key.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        pub = key._key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        return seed, pub
+
+    @pytest.mark.parametrize("version", [2, 4])
+    def test_secret_import_channels_share_identity_and_verify_real_signatures(self, version):
+        pem_sk = load_key("keys/private_key_ed25519.pem")
+        pem_pk = load_key("keys/public_key_ed25519.pem")
+
+        from_pem = Key.new(version, "public", pem_sk)
+        paserk = from_pem.to_paserk()
+        assert len(base64url_decode(paserk.split(".")[2])) == 64
+
+        from_bare = Key.from_paserk(paserk)
+        from_pem_again = Key.new(version, "public", pem_sk)
+        public_key = Key.new(version, "public", pem_pk)
+
+        # Encoding identity across the bare PASERK and PEM import channels.
+        assert from_bare.to_paserk() == paserk
+        assert from_pem_again.to_paserk() == paserk
+        assert from_bare.to_paserk_id() == from_pem.to_paserk_id()
+        assert from_pem_again.to_paserk_id() == from_pem.to_paserk_id()
+
+        # The peer ID of the secret key is the ID of the matching public key.
+        assert from_bare.to_peer_paserk_id() == public_key.to_paserk_id()
+        assert from_pem.to_peer_paserk_id() == public_key.to_paserk_id()
+        assert public_key.to_peer_paserk_id() == ""
+
+        # Real signature verification: sign with each imported private key and
+        # verify with the independently imported public key and with the peer.
+        for signer in (from_bare, from_pem, from_pem_again):
+            token = pyseto.encode(signer, b"Hello world!")
+            assert pyseto.decode(public_key, token).payload == b"Hello world!"
+            assert pyseto.decode(signer, token).payload == b"Hello world!"
+
+        # A tampered PASERK must not round-trip into the legitimate key.
+        raw = base64url_decode(paserk.split(".")[2])
+        tampered = f"k{version}.secret." + base64url_encode(raw[0:32] + token_bytes(32)).decode("utf-8")
+        with pytest.raises(ValueError):
+            Key.from_paserk(tampered)
+
+    @pytest.mark.parametrize("version", [2, 4])
+    def test_wrapped_secret_round_trip_preserves_identity_and_verifies(self, version):
+        wrapping_key = token_bytes(32)
+        password = b"correct horse battery staple"
+        sk = Key.new(version, "public", load_key("keys/private_key_ed25519.pem"))
+        pk = Key.new(version, "public", load_key("keys/public_key_ed25519.pem"))
+
+        wrapped = sk.to_paserk(wrapping_key=wrapping_key)
+        unwrapped = Key.from_paserk(wrapped, wrapping_key=wrapping_key)
+        assert unwrapped.to_paserk() == sk.to_paserk()
+        assert unwrapped.to_paserk_id() == sk.to_paserk_id()
+        assert unwrapped.to_peer_paserk_id() == pk.to_paserk_id()
+
+        token = pyseto.encode(unwrapped, b"wrapped message")
+        assert pyseto.decode(pk, token).payload == b"wrapped message"
+
+        pw_wrapped = sk.to_paserk(password=password)
+        pw_unwrapped = Key.from_paserk(pw_wrapped, password=password)
+        assert pw_unwrapped.to_paserk() == sk.to_paserk()
+        assert pw_unwrapped.to_paserk_id() == sk.to_paserk_id()
+        assert pw_unwrapped.to_peer_paserk_id() == pk.to_paserk_id()
+
+        token = pyseto.encode(pw_unwrapped, b"pw message")
+        assert pyseto.decode(pk, token).payload == b"pw message"
