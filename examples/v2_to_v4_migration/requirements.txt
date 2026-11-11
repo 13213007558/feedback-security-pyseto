@@ -1,0 +1,3 @@
+pyseto>=1.10,<2
+cryptography>=42
+pytest>=8
