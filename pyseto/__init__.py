@@ -8,6 +8,7 @@ from .exceptions import (
 )
 from .key import Key
 from .key_interface import KeyInterface
+from .key_set import KeySet, extract_kid
 from .paseto import Paseto
 from .pyseto import decode, encode
 from .token import Token
@@ -27,6 +28,8 @@ __all__ = [
     "decode",
     "Key",
     "KeyInterface",
+    "KeySet",
+    "extract_kid",
     "Paseto",
     "PysetoError",
     "Token",

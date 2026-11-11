@@ -4,6 +4,8 @@ Changes
 Unreleased
 ----------
 
+- Add an immutable, pre-indexed ``KeySet`` that selects a single verification/decryption key from a ``kid`` hint in the token footer, reducing the number of cryptographic operations when many public keys are held. The hint is unauthenticated and used only for lookup; the full token, version, purpose and footer are still verified. Unknown or version/purpose-mismatched hints fail deterministically, and a missing/malformed hint preserves the existing all-keys scan.
+
 Version 1.10.0
 --------------
 

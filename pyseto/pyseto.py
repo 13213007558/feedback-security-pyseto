@@ -2,6 +2,7 @@ import json
 from typing import Any
 
 from .key_interface import KeyInterface
+from .key_set import KeySet
 from .paseto import Paseto
 from .token import Token
 
@@ -49,7 +50,7 @@ def encode(
 
 
 def decode(
-    keys: KeyInterface | list[KeyInterface],
+    keys: KeyInterface | KeySet | list[KeyInterface],
     token: bytes | str,
     implicit_assertion: bytes | str = b"",
     deserializer: Any | None = None,
@@ -59,7 +60,12 @@ def decode(
     Decodes a PASETO token with a key for decryption and/or verifying.
 
     Args:
-        keys (KeyInterface): A key for decryption or verifying the signature in the token.
+        keys (Union[KeyInterface, KeySet, list[KeyInterface]]): A key, a list
+            of keys, or a :class:`KeySet <pyseto.key_set.KeySet>` for decryption
+            or verifying the signature in the token. With a ``KeySet`` and a
+            ``kid`` member in the token's JSON footer, the hint is used only to
+            look up a single candidate key; the token is still verified in full,
+            including its footer.
         token (Union[bytes, str]): A PASETO token to be decrypted or verified.
         implicit_assertion (Union[bytes, str]): An implicit assertion. It is
             only used in ``v3`` or ``v4``.

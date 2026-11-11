@@ -377,3 +377,58 @@ Note that `pyseto.encode()` and `pyseto.decode()` are aliases to the `encode()` 
     assert decoded.payload["data"] == "this is a signed message"
     assert decoded.payload["iat"] == "2021-11-11T00:00:00+00:00"
     assert decoded.payload["exp"] == "2021-11-11T01:00:00+00:00"
+
+Selecting a key with a pre-indexed KeySet
+-----------------------------------------
+
+When a service holds many verification keys, passing a plain list to
+``pyseto.decode()`` tries every header-matching key in turn, which means a
+real cryptographic verification (or decryption) for each one. A
+:class:`pyseto.KeySet` is an immutable, pre-indexed collection that maps each
+key's PASERK ID (``key.to_paserk_id()``) to the key itself.
+
+If the token's JSON footer carries a ``kid`` member, it is used purely as a
+lookup hint to select a single candidate. The hint is unauthenticated at lookup
+time, so it never proves anything on its own: the selected key still verifies
+the complete token, including its version, purpose and the very footer that
+carried the hint. A forged or unknown hint cannot make the wrong key pass.
+
+.. code-block:: python
+
+    import json
+    import pyseto
+    from pyseto import Key, KeySet
+
+    # Build once and reuse; the set is a defensive copy and never changes.
+    public_keys = KeySet(
+        [
+            Key.new(4, "public", public_key_pem_1),
+            Key.new(4, "public", public_key_pem_2),
+            Key.new(3, "public", ecdsa_public_key_pem),
+        ]
+    )
+
+    # The signer names its key in the (JSON) footer.
+    token = pyseto.encode(
+        private_key,
+        b"this is a signed message",
+        footer=json.dumps({"kid": public_key.to_paserk_id()}),
+    )
+
+    # Exactly one candidate key is verified, instead of the whole list.
+    decoded = pyseto.decode(public_keys, token)
+    assert decoded.payload == b"this is a signed message"
+
+Behavior summary:
+
+- A known ``kid`` whose key matches the token header verifies that single key.
+- An unknown ``kid``, or one whose key disagrees on version/purpose, raises a
+  ``ValueError`` deterministically; the decoder never guesses or falls back to
+  a full scan.
+- A missing or non-JSON footer (or one without a string ``kid``) means "no
+  hint": every header-matching key is tried in first-seen order, matching the
+  list-based behavior.
+- Re-adding the same key is a no-op, so it is never verified twice; identical
+  material under different versions gets distinct, version-namespaced PASERK
+  IDs and is indexed separately.
+- Decoding performs no network access; the hint is read from the local footer.

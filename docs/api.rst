@@ -13,6 +13,12 @@ API Reference
    :show-inheritance:
    :member-order: bysource
 
+.. automodule:: pyseto.key_set
+   :members:
+   :undoc-members:
+   :show-inheritance:
+   :member-order: bysource
+
 .. automodule:: pyseto.token
    :members:
    :undoc-members:

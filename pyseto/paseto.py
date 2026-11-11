@@ -7,6 +7,7 @@ import iso8601
 
 from .exceptions import VerifyError
 from .key_interface import KeyInterface
+from .key_set import KeySet, extract_kid
 from .token import Token
 from .utils import base64url_encode
 
@@ -146,7 +147,7 @@ class Paseto:
 
     def decode(
         self,
-        keys: KeyInterface | list[KeyInterface],
+        keys: KeyInterface | KeySet | list[KeyInterface],
         token: bytes | str,
         implicit_assertion: bytes | str = b"",
         deserializer: Any | None = None,
@@ -156,7 +157,12 @@ class Paseto:
         Decodes a PASETO token with a key for decryption and/or verifying.
 
         Args:
-            keys (KeyInterface): A key for decryption or verifying the signature in the token.
+            keys (Union[KeyInterface, KeySet, list[KeyInterface]]): A key, a
+                list of keys, or a :class:`KeySet <pyseto.key_set.KeySet>` for
+                decryption or verifying the signature in the token. With a
+                ``KeySet`` and a ``kid`` member in the token's JSON footer, the
+                hint is used only to look up a single candidate key; the token
+                is still verified in full, including its footer.
             token (Union[bytes, str]): A PASETO token to be decrypted or verified.
             implicit_assertion (Union[bytes, str]): An implicit assertion. It is
                 only used in ``v3`` or ``v4``.
@@ -183,14 +189,30 @@ class Paseto:
             except AttributeError as err:
                 raise ValueError("deserializer should have loads().") from err
 
-        keys = keys if isinstance(keys, list) else [keys]
+        if not isinstance(keys, (KeyInterface, KeySet, list)):
+            raise ValueError("keys should be a KeyInterface, a KeySet or a list of KeyInterface.")
+
         bi = implicit_assertion if isinstance(implicit_assertion, bytes) else implicit_assertion.encode("utf-8")
 
-        failed = None
         t = Token.new(token)
-        for k in keys:
-            if k.header != t.header:
-                continue
+
+        if isinstance(keys, KeySet):
+            # The kid lives in the unauthenticated footer: use it only to narrow
+            # the candidate set. The selected key still verifies the whole token
+            # (version, purpose, payload and the footer carrying the hint).
+            raw_footer = cast(bytes, t.footer)
+            kid = extract_kid(raw_footer)
+            candidates = keys.candidates(t.header, kid)
+            if kid and not candidates:
+                # A present-but-unusable hint (unknown id, or a version/purpose
+                # mismatch) is deterministic: never guess or fall back to a scan.
+                raise ValueError(f"No key matching the kid hint ({kid}) was found.")
+        else:
+            key_list = keys if isinstance(keys, list) else [keys]
+            candidates = [k for k in key_list if k.header == t.header]
+
+        failed = None
+        for k in candidates:
             try:
                 if k.purpose == "local":
                     t.payload = k.decrypt(cast(bytes, t.payload), cast(bytes, t.footer), bi)
