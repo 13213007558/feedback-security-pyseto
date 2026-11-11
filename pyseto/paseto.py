@@ -188,6 +188,7 @@ class Paseto:
 
         failed = None
         t = Token.new(token)
+        authenticated = False
         for k in keys:
             if k.header != t.header:
                 continue
@@ -196,29 +197,32 @@ class Paseto:
                     t.payload = k.decrypt(cast(bytes, t.payload), cast(bytes, t.footer), bi)
                 else:
                     t.payload = k.verify(cast(bytes, t.payload), cast(bytes, t.footer), bi)
-                try:
-                    if deserializer:
-                        t.payload = deserializer.loads(t.payload)
-                except Exception as err:
-                    raise ValueError("Failed to deserialize the payload.") from err
-                if deserializer:
-                    try:
-                        if t.footer:
-                            t.footer = deserializer.loads(t.footer)
-                    except Exception as err:
-                        # Footer deserialization is optional; continue if it fails
-                        warnings.warn(
-                            f"Failed to deserialize footer: {err}",
-                            UserWarning,
-                            stacklevel=2,
-                        )
-                    self._verify_registered_claims(cast(dict[str, Any], t.payload), aud)
-                return t
+                authenticated = True
+                break
             except Exception as err:
                 failed = err
-        if failed:
-            raise failed
-        raise ValueError("key is not found for verifying the token.")
+        if not authenticated:
+            if failed:
+                raise failed
+            raise ValueError("key is not found for verifying the token.")
+
+        if deserializer:
+            try:
+                t.payload = deserializer.loads(t.payload)
+            except Exception as err:
+                raise ValueError("Failed to deserialize the payload.") from err
+            try:
+                if t.footer:
+                    t.footer = deserializer.loads(t.footer)
+            except Exception as err:
+                # Footer deserialization is optional; continue if it fails
+                warnings.warn(
+                    f"Failed to deserialize footer: {err}",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            self._verify_registered_claims(cast(dict[str, Any], t.payload), aud)
+        return t
 
     def _set_registered_claims(self, claims: dict[str, Any], exp: int) -> dict[str, Any]:
         now = datetime.now(tz=timezone.utc).replace(microsecond=0)

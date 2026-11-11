@@ -32,6 +32,18 @@ class InvalidDeserializer2:
         raise NotImplementedError("Not implemented")
 
 
+class CountingDeserializer:
+    def __init__(self, fail: bool = False):
+        self.calls = 0
+        self.fail = fail
+
+    def loads(self, b):
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("deserialization failed.")
+        return json.loads(b)
+
+
 class TestPyseto:
     """
     Tests for pyseto.encode and decode.
@@ -408,3 +420,89 @@ class TestPyseto:
         pk1 = Key.new(4, "public", load_key("keys/public_key_ed25519.pem"))
         decoded = pyseto.decode([pk2, pk1], token)
         assert decoded.payload == b"Hello world!"
+
+    def test_decode_with_multiple_keys_wrong_local_key_first(self):
+        sk = Key.new(4, "local", b"a" * 32)
+        wrong = Key.new(4, "local", b"b" * 32)
+        token = pyseto.encode(sk, {"data": "this is a signed message"})
+        deserializer = CountingDeserializer()
+        decoded = pyseto.decode([wrong, sk], token, deserializer=deserializer)
+        assert decoded.payload["data"] == "this is a signed message"
+        assert deserializer.calls == 1
+
+    def test_decode_with_multiple_keys_wrong_public_key_first(self):
+        sk = Key.new(4, "public", load_key("keys/private_key_ed25519.pem"))
+        pk = Key.new(4, "public", load_key("keys/public_key_ed25519.pem"))
+        wrong = Key.new(4, "public", load_key("keys/public_key_ed25519_2.pem"))
+        token = pyseto.encode(sk, {"data": "this is a signed message"})
+        deserializer = CountingDeserializer()
+        decoded = pyseto.decode([wrong, pk], token, deserializer=deserializer)
+        assert decoded.payload["data"] == "this is a signed message"
+        assert deserializer.calls == 1
+
+    def test_decode_with_multiple_keys_correct_local_key_first_failing_deserializer(self):
+        sk = Key.new(4, "local", b"a" * 32)
+        wrong = Key.new(4, "local", b"b" * 32)
+        token = pyseto.encode(sk, {"data": "this is a signed message"})
+        deserializer = CountingDeserializer(fail=True)
+        with pytest.raises(ValueError) as err:
+            pyseto.decode([sk, wrong], token, deserializer=deserializer)
+            pytest.fail("pyseto.decode() should fail.")
+        assert "Failed to deserialize the payload." in str(err.value)
+        assert deserializer.calls == 1
+
+    def test_decode_with_multiple_keys_correct_public_key_first_failing_deserializer(self):
+        sk = Key.new(4, "public", load_key("keys/private_key_ed25519.pem"))
+        pk = Key.new(4, "public", load_key("keys/public_key_ed25519.pem"))
+        wrong = Key.new(4, "public", load_key("keys/public_key_ed25519_2.pem"))
+        token = pyseto.encode(sk, {"data": "this is a signed message"})
+        deserializer = CountingDeserializer(fail=True)
+        with pytest.raises(ValueError) as err:
+            pyseto.decode([pk, wrong], token, deserializer=deserializer)
+            pytest.fail("pyseto.decode() should fail.")
+        assert "Failed to deserialize the payload." in str(err.value)
+        assert deserializer.calls == 1
+
+    def test_decode_with_multiple_keys_correct_local_key_first_failing_claims(self):
+        sk = Key.new(4, "local", b"a" * 32)
+        wrong = Key.new(4, "local", b"b" * 32)
+        token = pyseto.encode(sk, {"aud": "someone-else"})
+        deserializer = CountingDeserializer()
+        with pytest.raises(VerifyError) as err:
+            pyseto.decode([sk, wrong], token, deserializer=deserializer, aud="me")
+            pytest.fail("pyseto.decode() should fail.")
+        assert "aud verification failed." in str(err.value)
+        assert deserializer.calls == 1
+
+    def test_decode_with_multiple_keys_correct_public_key_first_failing_claims(self):
+        sk = Key.new(4, "public", load_key("keys/private_key_ed25519.pem"))
+        pk = Key.new(4, "public", load_key("keys/public_key_ed25519.pem"))
+        wrong = Key.new(4, "public", load_key("keys/public_key_ed25519_2.pem"))
+        token = pyseto.encode(sk, {"aud": "someone-else"})
+        deserializer = CountingDeserializer()
+        with pytest.raises(VerifyError) as err:
+            pyseto.decode([pk, wrong], token, deserializer=deserializer, aud="me")
+            pytest.fail("pyseto.decode() should fail.")
+        assert "aud verification failed." in str(err.value)
+        assert deserializer.calls == 1
+
+    def test_decode_with_duplicate_local_keys_failing_deserializer(self):
+        sk = Key.new(4, "local", b"a" * 32)
+        token = pyseto.encode(sk, {"data": "this is a signed message"})
+        deserializer = CountingDeserializer(fail=True)
+        with pytest.raises(ValueError) as err:
+            pyseto.decode([sk, sk], token, deserializer=deserializer)
+            pytest.fail("pyseto.decode() should fail.")
+        assert "Failed to deserialize the payload." in str(err.value)
+        assert deserializer.calls == 1
+
+    def test_decode_with_duplicate_public_keys_failing_deserializer(self):
+        sk = Key.new(4, "public", load_key("keys/private_key_ed25519.pem"))
+        pk = Key.new(4, "public", load_key("keys/public_key_ed25519.pem"))
+        token = pyseto.encode(sk, {"data": "this is a signed message"})
+        deserializer = CountingDeserializer(fail=True)
+        with pytest.raises(ValueError) as err:
+            pyseto.decode([pk, pk], token, deserializer=deserializer)
+            pytest.fail("pyseto.decode() should fail.")
+        assert "Failed to deserialize the payload." in str(err.value)
+        assert deserializer.calls == 1
